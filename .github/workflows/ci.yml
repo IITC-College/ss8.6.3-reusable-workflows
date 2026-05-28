@@ -76,10 +76,11 @@ jobs:
     uses: ./.github/workflows/reusable-test.yml
     with:
       node-version: ${{ matrix.node-version }}
-      # If the demo flag is on, pass a guaranteed-fail command. Otherwise
-      # run the normal test suite.
-      test-command: >-
-        ${{ inputs.force_test_failure && 'sh -c "echo forced && exit 1"' || 'npm test' }}
+      # If the demo flag is on, run a guaranteed-fail command.
+      # Note: we pass a SHELL-SAFE single-quoted command (no embedded
+      # double-quotes) to avoid template-injection issues when the input
+      # later appears inside `echo "..."` banners.
+      test-command: ${{ inputs.force_test_failure && 'false' || 'npm test' }}
       allow-failure: false
 
   # ---------------------------------------------------------------------------
