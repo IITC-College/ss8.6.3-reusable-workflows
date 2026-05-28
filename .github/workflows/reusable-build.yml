@@ -73,6 +73,9 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
+      # Cache the npm tarball cache (~/.npm) — speeds up `npm ci` by reusing
+      # downloaded packages. `npm ci` still runs every time to populate
+      # node_modules from the cache.
       - name: Restore npm cache
         id: npm-cache
         uses: actions/cache@v4
@@ -82,15 +85,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-node${{ inputs.node-version }}-npm-
 
-      - name: Install dependencies (cache miss only)
-        if: steps.npm-cache.outputs.cache-hit != 'true'
+      - name: Install dependencies
         run: |
-          echo "Cache MISS — running npm ci."
+          if [ "${{ steps.npm-cache.outputs.cache-hit }}" = "true" ]; then
+            echo "Cache HIT — npm ci will reuse ~/.npm tarballs (fast)."
+          else
+            echo "Cache MISS — npm ci will download fresh tarballs."
+          fi
           npm ci
-
-      - name: Skip install (cache hit)
-        if: steps.npm-cache.outputs.cache-hit == 'true'
-        run: echo "Cache HIT — skipping npm ci."
 
       - name: Build application
         id: build
