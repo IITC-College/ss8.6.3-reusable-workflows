@@ -1,0 +1,139 @@
+name: Reusable — Test
+
+# =============================================================================
+# REUSABLE WORKFLOW: Test
+# -----------------------------------------------------------------------------
+# Same pattern as reusable-build.yml — callable only via `workflow_call`.
+#
+# Demonstrates THREE pieces of GitHub Actions behavior at once:
+#   1. continue-on-error (driven by an input, so callers can opt in)
+#   2. if: failure() for conditional artifact upload
+#   3. Output propagation back to the caller for downstream gating
+# =============================================================================
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version to test against'
+        type: string
+        required: true
+      test-command:
+        description: 'Command used to run the tests'
+        type: string
+        required: false
+        default: 'npm test'
+      allow-failure:
+        description: 'If true, a failing test command does NOT fail the job'
+        type: boolean
+        required: false
+        default: false
+
+    outputs:
+      test-result:
+        description: 'success | failure — outcome of the test command'
+        value: ${{ jobs.test.outputs.test-result }}
+      failed-tests:
+        description: 'Summary string describing failed tests (or "none")'
+        value: ${{ jobs.test.outputs.failed-tests }}
+
+jobs:
+  test:
+    name: Test (reusable)
+    runs-on: ubuntu-latest
+
+    outputs:
+      test-result: ${{ steps.result.outputs.test-result }}
+      failed-tests: ${{ steps.result.outputs.failed-tests }}
+
+    steps:
+      - name: Banner — workflow started
+        run: |
+          echo "=============================================================="
+          echo " Reusable workflow STARTED: reusable-test.yml"
+          echo "=============================================================="
+          echo " Inputs received:"
+          echo "   node-version   = ${{ inputs.node-version }}"
+          echo "   test-command   = ${{ inputs.test-command }}"
+          echo "   allow-failure  = ${{ inputs.allow-failure }}"
+          echo " Will emit outputs:"
+          echo "   test-result, failed-tests"
+          echo "=============================================================="
+
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Restore npm cache
+        id: npm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node${{ inputs.node-version }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node${{ inputs.node-version }}-npm-
+
+      - name: Install dependencies
+        run: npm ci
+
+      # -----------------------------------------------------------------------
+      # The key step. `continue-on-error` is wired to an INPUT so the CALLER
+      # decides whether a failure should propagate. This is exactly how
+      # platform teams expose "soft-fail" behavior to product teams.
+      # -----------------------------------------------------------------------
+      - name: Run tests
+        id: vitest
+        continue-on-error: ${{ inputs.allow-failure }}
+        run: |
+          echo "Executing: ${{ inputs.test-command }}"
+          ${{ inputs.test-command }}
+
+      # if: failure() ensures this step only runs when an earlier step failed.
+      # Without it, a previous-step failure would short-circuit the job and
+      # this step would simply be SKIPPED — and we'd lose the diagnostic.
+      - name: Upload test report (only on failure)
+        if: failure() && steps.vitest.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-node-${{ inputs.node-version }}
+          path: |
+            test/test.json
+            tests/**/*.log
+          if-no-files-found: warn
+
+      - name: Show outcome vs conclusion (teaching aid)
+        if: always()
+        run: |
+          echo "vitest.outcome    = ${{ steps.vitest.outcome }}    # raw result"
+          echo "vitest.conclusion = ${{ steps.vitest.conclusion }} # after continue-on-error"
+
+      # ---------------------------------------------------------------------
+      # Emit outputs so the caller can decide whether to deploy.
+      # We use outcome (raw result) — NOT conclusion — so an allow-failure
+      # caller can still SEE the truth and gate deploys accordingly.
+      # ---------------------------------------------------------------------
+      - name: Emit outputs
+        id: result
+        if: always()
+        run: |
+          RESULT="${{ steps.vitest.outcome }}"
+          if [ "$RESULT" = "success" ]; then
+            FAILED="none"
+          else
+            FAILED="vitest run failed for node-version=${{ inputs.node-version }}"
+          fi
+          echo "test-result=$RESULT" >> "$GITHUB_OUTPUT"
+          echo "failed-tests=$FAILED" >> "$GITHUB_OUTPUT"
+          echo "Emitted test-result=$RESULT"
+          echo "Emitted failed-tests=$FAILED"
+
+      - name: Banner — workflow finished
+        if: always()
+        run: |
+          echo "=============================================================="
+          echo " Reusable workflow FINISHED: reusable-test.yml"
+          echo "   test-result  = ${{ steps.vitest.outcome }}"
+          echo "   node-version = ${{ inputs.node-version }}"
+          echo "=============================================================="

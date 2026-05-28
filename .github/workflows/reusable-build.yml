@@ -1,0 +1,128 @@
+name: Reusable — Build
+
+# =============================================================================
+# REUSABLE WORKFLOW: Build
+# -----------------------------------------------------------------------------
+# This workflow is intentionally NOT triggered by push/pull_request/dispatch.
+# It exists ONLY to be CALLED by another workflow via `uses:` + `workflow_call`.
+#
+# Educational point:
+#   * In a real engineering organization, the platform team owns this file.
+#   * Every product repo gets the SAME build behavior by referencing it.
+#   * One change here = every consumer pipeline updates. That is DRY CI.
+# =============================================================================
+on:
+  workflow_call:
+    # -------------------------------------------------------------------------
+    # INPUTS — the public "API" of this reusable workflow.
+    # -------------------------------------------------------------------------
+    inputs:
+      node-version:
+        description: 'Node.js version to build with (e.g. "20")'
+        type: string
+        required: true
+      artifact-name:
+        description: 'Name to assign to the uploaded build artifact'
+        type: string
+        required: false
+        default: 'dist'
+
+    # -------------------------------------------------------------------------
+    # OUTPUTS — values this workflow returns to its caller.
+    # Caller consumes via:  ${{ needs.<job-id>.outputs.<output-name> }}
+    # -------------------------------------------------------------------------
+    outputs:
+      build-status:
+        description: 'success | failure — final status of the build step'
+        value: ${{ jobs.build.outputs.build-status }}
+      artifact-generated:
+        description: 'true | false — whether the artifact was uploaded'
+        value: ${{ jobs.build.outputs.artifact-generated }}
+
+jobs:
+  build:
+    name: Build (reusable)
+    runs-on: ubuntu-latest
+
+    # Map step outputs → job outputs so the CALLER can read them.
+    outputs:
+      build-status: ${{ steps.result.outputs.build-status }}
+      artifact-generated: ${{ steps.upload.outcome == 'success' }}
+
+    steps:
+      - name: Banner — workflow started
+        run: |
+          echo "=============================================================="
+          echo " Reusable workflow STARTED: reusable-build.yml"
+          echo "=============================================================="
+          echo " Inputs received:"
+          echo "   node-version  = ${{ inputs.node-version }}"
+          echo "   artifact-name = ${{ inputs.artifact-name }}"
+          echo " Will emit outputs:"
+          echo "   build-status, artifact-generated"
+          echo " Context:"
+          echo "   event = ${{ github.event_name }}"
+          echo "   ref   = ${{ github.ref }}"
+          echo "   os    = ${{ runner.os }}"
+          echo "=============================================================="
+
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Restore npm cache
+        id: npm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node${{ inputs.node-version }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node${{ inputs.node-version }}-npm-
+
+      - name: Install dependencies (cache miss only)
+        if: steps.npm-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "Cache MISS — running npm ci."
+          npm ci
+
+      - name: Skip install (cache hit)
+        if: steps.npm-cache.outputs.cache-hit == 'true'
+        run: echo "Cache HIT — skipping npm ci."
+
+      - name: Build application
+        id: build
+        run: |
+          echo "Building with Node ${{ inputs.node-version }}..."
+          npm run build
+
+      - name: Upload build artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist/
+          retention-days: 7
+
+      # ---------------------------------------------------------------------
+      # Emit the workflow-level output. Writing to $GITHUB_OUTPUT is the
+      # supported way to expose a value to the caller.
+      # ---------------------------------------------------------------------
+      - name: Emit outputs
+        id: result
+        if: always()
+        run: |
+          STATUS="${{ steps.build.outcome }}"
+          echo "build-status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "Emitted build-status=$STATUS"
+
+      - name: Banner — workflow finished
+        if: always()
+        run: |
+          echo "=============================================================="
+          echo " Reusable workflow FINISHED: reusable-build.yml"
+          echo "   build-status       = ${{ steps.build.outcome }}"
+          echo "   artifact-generated = ${{ steps.upload.outcome == 'success' }}"
+          echo "=============================================================="

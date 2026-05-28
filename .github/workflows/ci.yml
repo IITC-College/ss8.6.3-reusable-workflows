@@ -1,0 +1,173 @@
+name: CI — Orchestrator (Reusable Workflows Demo)
+
+# =============================================================================
+# ORCHESTRATOR WORKFLOW
+# -----------------------------------------------------------------------------
+# This is the ONLY workflow in this repo with real triggers. Everything else
+# (build, test, deploy) lives in `reusable-*.yml` files that run *only* when
+# called by `uses:` below.
+#
+# Architecture (read top-to-bottom):
+#
+#     lint  ─────┐
+#                ├─► test-matrix (matrix of node 18/20/22, calls reusable-test)
+#                │        │
+#                │        ▼
+#                │     build (calls reusable-build, node 20)
+#                │              │
+#                │              ▼
+#                │       deploy-staging (calls reusable-deploy, env=staging)
+#                │              │
+#                │              ▼
+#                │     deploy-production (calls reusable-deploy, env=production
+#                │                                              main only)
+#                ▼
+#             report (if: failure(), summary of all needs.* outputs)
+#
+# What students should look for in the Actions UI:
+#   1. Reusable workflows appear as NESTED job groups (collapsible).
+#   2. The matrix produces 3 parallel runs of reusable-test.yml.
+#   3. Deploys are gated by an OUTPUT of the test job (output chaining).
+#   4. Trying to "Run workflow" on a reusable file from the UI is impossible.
+# =============================================================================
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      force_test_failure:
+        description: 'Force tests to fail (live demo of the report job + skip)'
+        type: boolean
+        default: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # LINT — inline job. Kept here to show that orchestrators can MIX inline
+  # work with reusable workflow calls. Not everything needs to be reusable.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+      - run: npm run lint
+
+  # ---------------------------------------------------------------------------
+  # TEST MATRIX — same reusable workflow, called repeatedly with different
+  # node-versions. This is the "matrix + reusable" combination — scalable
+  # CI architecture with centralized logic.
+  # ---------------------------------------------------------------------------
+  test-matrix:
+    name: Test (node ${{ matrix.node-version }})
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['18', '20', '22']
+    uses: ./.github/workflows/reusable-test.yml
+    with:
+      node-version: ${{ matrix.node-version }}
+      # If the demo flag is on, pass a guaranteed-fail command. Otherwise
+      # run the normal test suite.
+      test-command: >-
+        ${{ inputs.force_test_failure && 'sh -c "echo forced && exit 1"' || 'npm test' }}
+      allow-failure: false
+
+  # ---------------------------------------------------------------------------
+  # BUILD — calls reusable-build.yml. Runs once on Node 20 (the canonical
+  # build version) and only AFTER every matrix entry of test-matrix passes.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build
+    needs: test-matrix
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      node-version: '20'
+      artifact-name: dist
+
+  # ---------------------------------------------------------------------------
+  # DEPLOY → STAGING — OUTPUT-DRIVEN GATE.
+  # We don't just rely on `needs:` skip-on-failure semantics. We explicitly
+  # check the *output* of the build job to demonstrate workflow-to-workflow
+  # communication. This is the headline lesson of the module.
+  # ---------------------------------------------------------------------------
+  deploy-staging:
+    name: Deploy → staging
+    needs: build
+    if: needs.build.outputs.build-status == 'success'
+    uses: ./.github/workflows/reusable-deploy.yml
+    with:
+      artifact-name: dist
+      environment-name: staging
+      deploy-message: 'Deploying to STAGING from ${{ github.ref_name }}'
+    # ---------------------------------------------------------------------
+    # SECRETS — explicit pass-through.
+    # `MY_DEPLOY_SECRET` must be configured in:
+    #   Settings → Secrets and variables → Actions → New repository secret
+    # Alternative: `secrets: inherit` passes ALL secrets through. Avoid
+    # `inherit` in real platforms — it breaks the principle of least
+    # privilege. Always pass only what the reusable workflow needs.
+    # ---------------------------------------------------------------------
+    secrets:
+      deploy-token: ${{ secrets.MY_DEPLOY_SECRET }}
+
+  # ---------------------------------------------------------------------------
+  # DEPLOY → PRODUCTION — second call to the SAME reusable workflow, with
+  # different inputs and a stricter gate (main branch only, staging must
+  # have succeeded).
+  # ---------------------------------------------------------------------------
+  deploy-production:
+    name: Deploy → production (main only)
+    needs: deploy-staging
+    if: >-
+      github.ref == 'refs/heads/main'
+      && github.event_name != 'pull_request'
+      && needs.deploy-staging.outputs.deployment-result == 'success'
+    uses: ./.github/workflows/reusable-deploy.yml
+    with:
+      artifact-name: dist
+      environment-name: production
+      deploy-message: 'Deploying to PRODUCTION from ${{ github.ref_name }}'
+    secrets:
+      deploy-token: ${{ secrets.MY_DEPLOY_SECRET }}
+
+  # ---------------------------------------------------------------------------
+  # REPORT — runs ONLY on failure of any upstream job. Demonstrates how to
+  # consume outputs from reusable workflows for diagnostic reporting.
+  # ---------------------------------------------------------------------------
+  report:
+    name: Failure Report
+    runs-on: ubuntu-latest
+    needs: [lint, test-matrix, build, deploy-staging, deploy-production]
+    if: failure()
+    steps:
+      - name: Summary
+        run: |
+          echo "=== Orchestrator failure summary ==="
+          echo "Workflow : ${{ github.workflow }}"
+          echo "Run ID   : ${{ github.run_id }}"
+          echo "Actor    : ${{ github.actor }}"
+          echo "Event    : ${{ github.event_name }}"
+          echo "Ref      : ${{ github.ref }}"
+          echo ""
+          echo "Job results:"
+          echo "  lint              = ${{ needs.lint.result }}"
+          echo "  test-matrix       = ${{ needs.test-matrix.result }}"
+          echo "  build             = ${{ needs.build.result }}"
+          echo "  deploy-staging    = ${{ needs.deploy-staging.result }}"
+          echo "  deploy-production = ${{ needs.deploy-production.result }}"
+          echo ""
+          echo "Reusable workflow outputs:"
+          echo "  build.build-status              = ${{ needs.build.outputs.build-status }}"
+          echo "  deploy-staging.deployment-result = ${{ needs.deploy-staging.outputs.deployment-result }}"
+          echo "  deploy-staging.deployed-at       = ${{ needs.deploy-staging.outputs.deployed-at }}"
+          echo "  deploy-production.deployment-result = ${{ needs.deploy-production.outputs.deployment-result }}"

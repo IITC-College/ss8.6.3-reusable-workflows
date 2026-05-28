@@ -1,0 +1,159 @@
+name: Reusable — Deploy
+
+# =============================================================================
+# REUSABLE WORKFLOW: Deploy (simulated)
+# -----------------------------------------------------------------------------
+# This is the deployment "engine" of a real platform team. A single, audited,
+# centrally-owned file that every team calls — instead of every team writing
+# their own deploy script. That is how organizations scale CI/CD safely.
+#
+# SECRETS — important teaching block:
+# -----------------------------------------------------------------------------
+#   * `secrets:` declared here defines the security CONTRACT with the caller.
+#   * The CALLER must pass the secret explicitly (or use `secrets: inherit`).
+#   * `secrets:` cannot have a `default:` — that would let a malicious caller
+#     accidentally rely on a server-side default and skip the security review.
+#   * Secrets exist in three scopes on GitHub:
+#       1. Repository secrets      → Settings > Secrets > Actions
+#       2. Environment secrets     → Settings > Environments > <env> > Secrets
+#       3. Organization secrets    → Org Settings > Secrets > Actions
+#   * GitHub automatically masks any secret VALUE printed to logs (you'll see
+#     `***`). We still write defensive code (length only, no raw `echo`)
+#     because:
+#       - the mask only catches exact substring matches;
+#       - composed strings (e.g. base64-encoding the secret first) can leak;
+#       - keeping the habit teaches good muscle memory for real systems.
+# =============================================================================
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: 'Name of the build artifact to download (must match build job)'
+        type: string
+        required: true
+      environment-name:
+        description: 'Target environment (e.g. staging, production)'
+        type: string
+        required: true
+      deploy-message:
+        description: 'Human-readable message printed during deployment'
+        type: string
+        required: false
+        default: 'Deploying...'
+
+    # No `default:` allowed here — secret contracts must be explicit.
+    secrets:
+      deploy-token:
+        description: 'Token used to authenticate against the (simulated) target'
+        required: true
+
+    outputs:
+      deployment-result:
+        description: 'success | failure — outcome of the simulated deploy'
+        value: ${{ jobs.deploy.outputs.deployment-result }}
+      deployed-at:
+        description: 'UTC ISO-8601 timestamp the simulated deploy completed'
+        value: ${{ jobs.deploy.outputs.deployed-at }}
+
+jobs:
+  deploy:
+    name: Deploy → ${{ inputs.environment-name }} (reusable)
+    runs-on: ubuntu-latest
+
+    outputs:
+      deployment-result: ${{ steps.result.outputs.deployment-result }}
+      deployed-at:       ${{ steps.result.outputs.deployed-at }}
+
+    steps:
+      - name: Banner — workflow started
+        run: |
+          echo "=============================================================="
+          echo " Reusable workflow STARTED: reusable-deploy.yml"
+          echo "=============================================================="
+          echo " Inputs received:"
+          echo "   artifact-name    = ${{ inputs.artifact-name }}"
+          echo "   environment-name = ${{ inputs.environment-name }}"
+          echo "   deploy-message   = ${{ inputs.deploy-message }}"
+          echo " Secrets received:"
+          echo "   deploy-token     = (length only printed below)"
+          echo " Will emit outputs:"
+          echo "   deployment-result, deployed-at"
+          echo "=============================================================="
+
+      - name: Download build artifact
+        id: download
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist
+
+      # ---------------------------------------------------------------------
+      # Fail fast with a clear, friendly message if the artifact is empty
+      # or missing. Better than a cryptic failure 5 steps later.
+      # ---------------------------------------------------------------------
+      - name: Validate artifact
+        run: |
+          if [ ! -d dist ] || [ -z "$(ls -A dist 2>/dev/null)" ]; then
+            echo "ERROR: artifact '${{ inputs.artifact-name }}' missing or empty."
+            exit 1
+          fi
+          echo "Artifact OK — contents:"
+          ls -la dist
+
+      # ---------------------------------------------------------------------
+      # Demonstrate SAFE secret handling.
+      # We map the secret into the step's env (the standard pattern) and only
+      # ever print its LENGTH, never its value.
+      # ---------------------------------------------------------------------
+      - name: Inspect token safely (length only)
+        env:
+          TOKEN: ${{ secrets.deploy-token }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "ERROR: deploy-token was not provided by the caller."
+            exit 1
+          fi
+          echo "deploy-token length: ${#TOKEN} characters"
+          echo "deploy-token preview: ${TOKEN:0:1}***${TOKEN: -1}  (masked)"
+
+      - name: Simulate deployment
+        id: deploy
+        env:
+          TOKEN: ${{ secrets.deploy-token }}
+        run: |
+          echo "=============================================================="
+          echo " ${{ inputs.deploy-message }}"
+          echo "=============================================================="
+          echo " Environment : ${{ inputs.environment-name }}"
+          echo " Artifact    : ${{ inputs.artifact-name }}"
+          echo " Commit      : ${{ github.sha }}"
+          echo " Branch      : ${{ github.ref_name }}"
+          echo " Actor       : ${{ github.actor }}"
+          echo " Event       : ${{ github.event_name }}"
+          echo " Runner OS   : ${{ runner.os }}"
+          echo " Auth        : token-length=${#TOKEN}"
+          echo "--------------------------------------------------------------"
+          echo " Pretending to upload dist/ to ${{ inputs.environment-name }}..."
+          sleep 2
+          echo " Deployment to ${{ inputs.environment-name }} complete."
+          echo "=============================================================="
+
+      - name: Emit outputs
+        id: result
+        if: always()
+        run: |
+          RESULT="${{ steps.deploy.outcome }}"
+          TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "deployment-result=$RESULT" >> "$GITHUB_OUTPUT"
+          echo "deployed-at=$TIMESTAMP" >> "$GITHUB_OUTPUT"
+          echo "Emitted deployment-result=$RESULT"
+          echo "Emitted deployed-at=$TIMESTAMP"
+
+      - name: Banner — workflow finished
+        if: always()
+        run: |
+          echo "=============================================================="
+          echo " Reusable workflow FINISHED: reusable-deploy.yml"
+          echo "   environment       = ${{ inputs.environment-name }}"
+          echo "   deployment-result = ${{ steps.deploy.outcome }}"
+          echo "=============================================================="
